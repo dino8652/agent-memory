@@ -86,7 +86,10 @@ class WrapperTests(unittest.TestCase):
             (default_dir / "default-project.json").write_text(json.dumps({"path": str(project)}), encoding="utf-8")
 
             with patch.dict("os.environ", {"USERPROFILE": str(home)}):
-                self.assertEqual(effective_root(home), project)
+                # effective_root returns a resolved path; compare resolved-to-resolved
+                # so this holds on macOS (/var -> /private/var symlink) and Windows
+                # (8.3 short names) where resolve() changes the path.
+                self.assertEqual(effective_root(home), project.resolve())
 
 
 if __name__ == "__main__":
