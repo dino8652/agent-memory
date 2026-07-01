@@ -1,5 +1,7 @@
 # Claude Memory Wrapper
 
+[![tests](https://github.com/dino8652/agent-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/dino8652/agent-memory/actions/workflows/ci.yml)
+
 A local-only CLI wrapper for Claude Code that remembers repeated project failures and injects scoped lessons into future sessions.
 
 Principle:
