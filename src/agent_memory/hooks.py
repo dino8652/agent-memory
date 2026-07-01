@@ -365,16 +365,35 @@ def handle_hook_payload(payload: dict[str, Any]) -> int:
         db.close()
 
 
+def _extract_failure(payload: dict[str, Any]) -> tuple[str, int | None]:
+    """Pull the failure text and exit code out of a PostToolUseFailure payload.
+
+    Real Claude Code puts the failure text at the TOP LEVEL under "error"
+    (e.g. "Exit code 1\n<stderr>") -- there is no "tool_response" wrapper on this
+    event. Read the top-level fields first, still accept a tool_response dict for
+    other/older payload shapes, and never fall back to stringifying an empty dict
+    (which produced the literal "{}" and starved every failure of signal).
+    """
+    text = payload.get("error") or payload.get("message") or payload.get("stderr")
+    exit_code = payload.get("exit_code") if isinstance(payload.get("exit_code"), int) else None
+
+    response = payload.get("tool_response")
+    if isinstance(response, dict):
+        text = text or response.get("stderr") or response.get("error") or response.get("message") or response.get("output")
+        if exit_code is None and isinstance(response.get("exit_code"), int):
+            exit_code = response.get("exit_code")
+
+    return (_stringify(text) if text else ""), exit_code
+
+
 def _handle_bash_failure(root: Path, db: MemoryDb, config: dict[str, Any], payload: dict[str, Any]) -> None:
     command = (payload.get("tool_input") or {}).get("command")
     if _is_agent_memory_command(command):
         return
-    response = payload.get("tool_response") or {}
-    stderr = _stringify(response.get("stderr") or response.get("error") or response.get("message") or response)
+    stderr, exit_code = _extract_failure(payload)
     recent_files = _recent_files(root, payload.get("session_id"))
     files_touched = _dedupe(recent_files + _file_mentions(f"{command or ''} {stderr}"))
     file_change_state = _file_change_state_for_failure(root, command, stderr, files_touched)
-    exit_code = response.get("exit_code") if isinstance(response, dict) else None
     event_id = db.insert_raw_event(
         project_id=config["project_id"],
         session_id=payload.get("session_id"),

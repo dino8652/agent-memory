@@ -253,6 +253,87 @@ class HookTests(unittest.TestCase):
             self.assertIn("Memory recall", response["hookSpecificOutput"]["additionalContext"])
             self.assertIn(lesson_id, response["hookSpecificOutput"]["additionalContext"])
 
+    def test_bash_failure_reads_top_level_error_field(self):
+        # Regression: real Claude Code PostToolUseFailure payloads carry the error
+        # text at the TOP LEVEL under "error" (no "tool_response" wrapper). The old
+        # code read payload["tool_response"], got None, and stored the literal "{}"
+        # -> empty error_terms -> signal capped at 0.35 < 0.4 -> failures could
+        # NEVER promote. Capture the real field so failures gain signal.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = init_project(root)
+            payload = {
+                "hook_event_name": "PostToolUseFailure",
+                "tool_name": "Bash",
+                "cwd": str(root),
+                "session_id": "s1",
+                "tool_input": {"command": "python -m pytest"},
+                "error": "Exit code 1\nRuntimeError: auth middleware rejected the valid session token",
+            }
+
+            handle_hook_payload(payload)
+
+            db = MemoryDb.open(root)
+            events = db.list_events(config["project_id"], 20)
+            candidates = db.list_candidates(config["project_id"])
+            db.close()
+
+            self.assertEqual(len(events), 1)
+            self.assertNotEqual(events[0]["stderr_excerpt"], "{}")
+            self.assertIn("RuntimeError", events[0]["stderr_excerpt"])
+            self.assertIn("auth middleware", events[0]["stderr_excerpt"])
+            # signal cleared the threshold, so a candidate was drafted (was 0 before)
+            self.assertEqual(len(candidates), 1)
+
+    def test_repeated_bash_failure_with_top_level_error_promotes(self):
+        # End-to-end: the command-failure learning feature must actually produce a
+        # lesson from a repeated real-payload failure with intervening edits.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "src" / "auth.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("value = 1\n", encoding="utf-8")
+            config = init_project(root)
+            edit = {
+                "hook_event_name": "PostToolUse", "tool_name": "Edit", "cwd": str(root),
+                "session_id": "s", "tool_input": {"file_path": "src/auth.py"},
+            }
+            failure = {
+                "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "cwd": str(root),
+                "session_id": "s", "tool_input": {"command": "python -m pytest"},
+                "error": "Exit code 1\nRuntimeError: auth middleware rejects the valid session token",
+            }
+
+            handle_hook_payload(edit)
+            handle_hook_payload(failure)
+            source.write_text("value = 2\n", encoding="utf-8")
+            handle_hook_payload(edit)
+            handle_hook_payload(failure)
+
+            db = MemoryDb.open(root)
+            lessons = db.enabled_lessons(config["project_id"], 10)
+            db.close()
+            self.assertGreaterEqual(len(lessons), 1)
+            self.assertIn("auth", lessons[0]["lesson"].lower())
+
+    def test_bash_failure_tool_response_fallback_still_works(self):
+        # Some payload shapes nest the failure under tool_response; keep supporting it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = init_project(root)
+            payload = {
+                "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "cwd": str(root),
+                "session_id": "s1", "tool_input": {"command": "npm test"},
+                "tool_response": {"stderr": "database timeout on startup", "exit_code": 1},
+            }
+
+            handle_hook_payload(payload)
+
+            db = MemoryDb.open(root)
+            events = db.list_events(config["project_id"], 20)
+            db.close()
+            self.assertEqual(events[0]["stderr_excerpt"], "database timeout on startup")
+
     def test_post_tool_use_failure_ignores_agent_memory_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
