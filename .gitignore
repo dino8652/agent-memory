@@ -1,0 +1,27 @@
+.agent-memory/
+.claude/settings.local.json
+.claude/hooks/agent-memory-hook.py
+.claude/commands/agent-memory.md
+.claude/commands/memory-status.md
+.claude/commands/memory-recall.md
+.claude/skills/agent-memory/
+.claude/skills/memory-status/
+.claude/skills/memory-recall/
+.claude/commands/memory-review.md
+.claude/commands/memory-why.md
+.claude/commands/memory-teach.md
+.claude/skills/memory-review/
+.claude/skills/memory-why/
+.claude/skills/memory-teach/
+.claude/commands/memory-doctor.md
+.claude/skills/memory-doctor/
+.claude/commands/memory-repair.md
+.claude/skills/memory-repair/
+
+# Python / build artifacts
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/

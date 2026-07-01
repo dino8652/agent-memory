@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-memory"
+version = "0.1.0"
+description = "Local-only failure-memory wrapper for Claude Code"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+memory = "agent_memory.cli:main"
+memory-claude = "agent_memory.wrapper:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
