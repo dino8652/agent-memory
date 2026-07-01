@@ -5,8 +5,76 @@ from pathlib import Path
 
 from agent_memory.config import init_project
 from agent_memory.db import MemoryDb
-from agent_memory.extractor import NormalizedEvent, process_raw_event, signal_score
+from agent_memory.extractor import (
+    NormalizedEvent,
+    _clean_correction,
+    _suggested_lesson,
+    error_signature,
+    process_raw_event,
+    signal_score,
+)
 from agent_memory.redaction import redact
+
+
+def _event(**kw) -> NormalizedEvent:
+    base = dict(
+        event_id="e", event_type="failed_command", command_family="unknown",
+        error_terms=[], files_touched=[], user_terms=[], file_change_state="unknown",
+        summary="",
+    )
+    base.update(kw)
+    return NormalizedEvent(**base)
+
+
+class LessonTextTests(unittest.TestCase):
+    def test_error_signature_extracts_exception_line_not_boilerplate(self):
+        traceback = (
+            "Exit code 1\n"
+            "Traceback (most recent call last):\n"
+            '  File "/app/booklog.py", line 12, in <module>\n'
+            "    from db import connect\n"
+            "    ~~~~~~~~~~~~~~~~~~~~~^^\n"
+            "ModuleNotFoundError: No module named 'db'"
+        )
+        sig = error_signature(traceback)
+        self.assertEqual(sig, "ModuleNotFoundError: No module named 'db'")
+        self.assertNotIn("File", sig)
+        self.assertNotIn("Traceback", sig)
+        self.assertNotIn("Exit code", sig)
+
+    def test_error_signature_picks_assertion_line(self):
+        out = "tests/test_money.py::test_total FAILED\nAssertionError: money stored as float lost precision"
+        self.assertEqual(error_signature(out), "AssertionError: money stored as float lost precision")
+
+    def test_error_signature_empty_for_no_text(self):
+        self.assertEqual(error_signature(""), "")
+        self.assertEqual(error_signature(None), "")
+
+    def test_correction_is_kept_verbatim_without_preamble(self):
+        cleaned = _clean_correction("No, that is wrong. Do not mock the DB in unit tests here.")
+        self.assertEqual(cleaned, "Do not mock the DB in unit tests here.")
+
+    def test_failure_lesson_surfaces_real_error_line(self):
+        event = _event(
+            command="python booklog.py",
+            raw_error="Traceback (most recent call last):\nModuleNotFoundError: No module named 'db'",
+        )
+        lesson = _suggested_lesson(event)
+        self.assertIn("python booklog.py", lesson)
+        self.assertIn("ModuleNotFoundError: No module named 'db'", lesson)
+        # no traceback scaffolding, no keyword soup
+        self.assertNotIn("most recent call", lesson)
+
+    def test_correction_lesson_is_the_users_words(self):
+        event = _event(
+            event_type="user_correction",
+            user_terms=["cached", "session"],
+            raw_correction="Actually, always use integer cents for money — never floats.",
+        )
+        self.assertEqual(
+            _suggested_lesson(event),
+            "always use integer cents for money — never floats.",
+        )
 
 
 class ExtractorTests(unittest.TestCase):
@@ -134,8 +202,10 @@ class ExtractorTests(unittest.TestCase):
             lessons = db.enabled_lessons(config["project_id"], 10)
             db.close()
             self.assertEqual(len(lessons), 1)
-            self.assertIn("Remember this user correction", lessons[0]["lesson"])
-            self.assertIn("cached session", lessons[0]["lesson"])
+            # The lesson is the user's own words, verbatim, with the "No, that is
+            # wrong." conversational preamble stripped -- not keyword soup.
+            self.assertIn("Do not trust cached session state in auth middleware", lessons[0]["lesson"])
+            self.assertNotIn("that is wrong", lessons[0]["lesson"].lower())
 
     def test_identical_correction_on_different_files_merges_to_one_lesson(self):
         with tempfile.TemporaryDirectory() as tmp:

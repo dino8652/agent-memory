@@ -20,11 +20,18 @@ CORRECTION_MARKERS = (
     "no,",
     "that's wrong",
     "that is wrong",
+    "that's not",
     "do not",
     "don't",
+    "doesn't",
+    "shouldn't",
+    "should not",
     "wrong",
     "rejected",
     "never",
+    "stop using",
+    "instead of",
+    "instead,",
 )
 
 

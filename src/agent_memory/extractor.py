@@ -16,6 +16,11 @@ class NormalizedEvent:
     user_terms: list[str]
     file_change_state: str
     summary: str
+    # Raw text is kept for HUMAN-READABLE lesson output. Keyword lists above are
+    # only for matching/clustering -- they must never be shown as the lesson.
+    command: str | None = None
+    raw_error: str = ""
+    raw_correction: str = ""
 
 
 def command_family(command: str | None) -> str:
@@ -64,6 +69,9 @@ def normalize_raw_event(row: dict[str, Any]) -> NormalizedEvent:
         user_terms=terms(row.get("user_text")),
         file_change_state=row.get("file_change_state") or "unknown",
         summary=row.get("summary") or "",
+        command=row.get("command"),
+        raw_error=row.get("stderr_excerpt") or "",
+        raw_correction=row.get("user_text") or "",
     )
 
 
@@ -131,18 +139,108 @@ def confidence_label(score: float) -> str:
     return "low"
 
 
+# Lines that are traceback scaffolding, not the actual error.
+_TRACEBACK_NOISE = re.compile(
+    r'^\s*('
+    r'traceback \(most recent call last\)|'
+    r'file ".*?", line \d+.*|'
+    r'at [\w$.<> ]+\(.*\)|'          # JS stack frames: "at fn (file:line)"
+    r'exit code \d+|'
+    r'during handling of the above.*|the above exception.*|'
+    r'[-=_]{3,}.*|'                   # separator rules
+    r'[\s~^|>+]+'                     # caret / underline / prompt-marker lines
+    r')\s*$',
+    re.IGNORECASE,
+)
+# Words that mark the salient error/assertion line inside noisy output.
+_ERROR_SIGNAL = re.compile(
+    r'\b(error|exception|assert\w*|expected|failure|not found|cannot find|no such|'
+    r'no module|undefined|is not defined|unresolved|panic|fatal|denied|refused|'
+    r'rejected|timed?\s?out|unrecognized|invalid|missing|conflict|npm err|'
+    r'syntaxerror|typeerror|valueerror|keyerror)\b',
+    re.IGNORECASE,
+)
+# Conversational preamble to strip from a correction so the lesson is the directive.
+_CORRECTION_PREAMBLE = re.compile(
+    r"^(no[,.]\s+|nope[,.]\s+|actually[,.]\s+|wait[,.]\s+|"
+    r"that\'?s (?:wrong|not right|incorrect|not it)[,.]?\s+|"
+    r"that is (?:wrong|not right|incorrect)[,.]?\s+|still wrong[,.]?\s+)+",
+    re.IGNORECASE,
+)
+
+
+def _tidy(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _clean_correction(text: str, limit: int = 240) -> str:
+    return _tidy(_CORRECTION_PREAMBLE.sub("", " ".join((text or "").split())).strip(), limit)
+
+
+def error_signature(text: str | None, limit: int = 160) -> str:
+    """Extract the meaningful error line from noisy stderr / a traceback.
+
+    Deterministic, no LLM: drop traceback scaffolding (``File "..."``, caret
+    lines, ``Traceback ...``, ``Exit code N``) and return the salient
+    error/assertion line -- e.g. ``ModuleNotFoundError: No module named 'x'`` --
+    rather than a bag of keywords. Exceptions usually sit at the end of a
+    traceback, so scan bottom-up for the first signal-bearing line.
+    """
+    if not text:
+        return ""
+    lines = [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip()
+        and not _TRACEBACK_NOISE.match(ln.strip())
+        and not ln.strip().lower().startswith(("file \"", "at ", "traceback"))
+    ]
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if _ERROR_SIGNAL.search(line):
+            return _tidy(line, limit)
+    return _tidy(lines[-1], limit)
+
+
 def _suggested_lesson(event: NormalizedEvent) -> str:
-    if event.user_terms:
-        phrase = " ".join(event.user_terms[:12])
-        return f"Remember this user correction before changing related code: {phrase}."
-    phrase = " ".join(event.error_terms[:12])
-    return f"When this failure appears again, review this project-specific pattern before changing code: {phrase}."
+    # A user correction is already a clear, human-written instruction. Keep it
+    # verbatim (minus conversational filler) instead of reducing it to keywords.
+    correction = _clean_correction(event.raw_correction)
+    if correction:
+        return correction
+    if event.user_terms:  # fallback only if the raw correction text is missing
+        return _tidy(" ".join(event.user_terms[:14]).capitalize(), 240)
+
+    # For a bare command failure, surface the real error line -- not term-soup.
+    signature = error_signature(event.raw_error)
+    command = (event.command or "").strip()
+    if signature and command:
+        return f"`{command}` has failed here before with: {signature}"
+    if signature:
+        return f"This failure has recurred here: {signature}"
+    if command:
+        return f"`{command}` has failed here before; check the project-specific setup."
+    return event.summary or "A project-specific command failure recurred here."
+
+
+def _candidate_title(event: NormalizedEvent) -> str:
+    correction = _clean_correction(event.raw_correction, limit=70)
+    if correction:
+        return correction
+    signature = error_signature(event.raw_error, limit=70)
+    if event.files_touched and signature:
+        return _tidy(f"{event.files_touched[0]}: {signature}", 80)
+    if signature:
+        return signature
+    if event.files_touched:
+        return f"Recurring failure near {event.files_touched[0]}"
+    return "Recurring project failure"
 
 
 def draft_candidate(db, project_id: str, event: NormalizedEvent, score: float) -> str:
-    title = "Review repeated project failure"
-    if event.files_touched:
-        title = f"Check {event.files_touched[0]} failure pattern"
+    title = _candidate_title(event)
     return db.insert_candidate(
         project_id=project_id,
         title=title,
@@ -240,9 +338,17 @@ def _similar_lesson(db, config: dict[str, Any], candidate: dict[str, Any]) -> di
     return None
 
 
+def _is_failure_signature(text: str) -> bool:
+    return "has failed here before" in text or text.startswith("This failure has recurred")
+
+
 def _preferred_lesson_text(existing: str, candidate: str) -> str:
-    if candidate.startswith("Remember this user correction"):
+    # A human correction (a plain-language instruction) is more valuable than an
+    # auto-generated failure signature, so prefer it when the two merge.
+    if _is_failure_signature(existing) and not _is_failure_signature(candidate):
         return candidate
+    if _is_failure_signature(candidate) and not _is_failure_signature(existing):
+        return existing
     return existing
 
 
