@@ -1,10 +1,10 @@
+import os
 import tempfile
 import unittest
 import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_memory import wrapper as wrapper_module
 from agent_memory.config import init_project
 from agent_memory.db import MemoryDb
 from agent_memory.wrapper import discover_claude_command, effective_root, prepare_session, run_claude
@@ -49,6 +49,7 @@ class WrapperTests(unittest.TestCase):
         with patch("shutil.which", return_value="C:\\Tools\\claude.exe"):
             self.assertEqual(discover_claude_command(), "C:\\Tools\\claude.exe")
 
+    @unittest.skipUnless(os.name == "nt", "native install glob is Windows-only")
     def test_discover_claude_command_finds_native_windows_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -66,12 +67,12 @@ class WrapperTests(unittest.TestCase):
             exe.parent.mkdir(parents=True)
             exe.write_text("", encoding="utf-8")
 
-            with patch("shutil.which", return_value=None), patch.dict("os.environ", {"LOCALAPPDATA": str(root)}), \
-                    patch.object(wrapper_module.os, "name", "nt"):
+            with patch("shutil.which", return_value=None), patch.dict("os.environ", {"LOCALAPPDATA": str(root)}):
                 self.assertEqual(discover_claude_command(), str(exe))
 
+    @unittest.skipUnless(os.name != "nt", "guard only applies off Windows")
     def test_discover_claude_command_skips_windows_glob_on_unix(self):
-        with patch("shutil.which", return_value=None), patch.object(wrapper_module.os, "name", "posix"):
+        with patch("shutil.which", return_value=None):
             self.assertIsNone(discover_claude_command())
 
     def test_effective_root_uses_default_project_from_home(self):
